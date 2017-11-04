@@ -15,6 +15,10 @@ int rotationRangeLeft[] = {40,140};
 
 float rollOutput = 0;
 float pitchOutput = 0; 
+float trimLeft = 0;
+float trimRight = 0;
+float pD=0;
+float rD=0;
 
 float joyX = 0;
 float joyY = 0;
@@ -33,24 +37,27 @@ uint8_t devStatus;
 uint16_t packetSize;
 uint16_t fifoCount;
 uint8_t fifoBuffer[64];
+bool lastWasAWhileLoop=false;  
 
 // ----- Rotation information and Plane stability -----
 Quaternion currentRotation;
-boolean first = true;
+bool first = true;
 Quaternion targetRotation;
-VectorFloat targetEuler(0,20,0);
+VectorFloat targetEuler(0,0,0);
 
 //              pitch | roll
 float pGain[2] = {0.0, 0.0};
 float iGain[2] = {0.0, 0.0};
-float dGain[2] = {0.0, 0.0};
+float dGain[2] = {90.0, 90.0};
 
 float error[2] = {0.0, 0.0};   // pitch and roll
 float lastError[2] = {0.0, 0.0}; // last pitch and roll error
+float delErr[2] = {0.0, 0.0};
 float accError[2] = {0.0, 0.0};
+float resetCounter = 0;
 
-
-
+float lastDeltaError[2] = {0.0, 0.0}; // to remove random spikes
+float lastlastDeltaError[2] = {0.0, 0.0};
 
 
 // ----- Interrupt -----
@@ -68,11 +75,33 @@ void pid(){
   accError[0]+=iGain[0]*error[0];
   accError[1]+=iGain[1]*error[1];
 
-  float pD = dGain[0] * (error[0] - lastError[0]);
-  float rD = dGain[1] * (error[1] - lastError[1]);
+  float anomalyMax = 50;
+  float anomalyMin = -50;
 
+  float deltaPitch = (dGain[0] * (error[0] - lastError[0]));
+  float deltaRoll = (dGain[1] * (error[1] - lastError[1]));
+  if(deltaPitch<anomalyMax && deltaPitch>anomalyMin){  
+  }else{
+    //Serial.println("Anomaly");
+  }
+  if(deltaRoll<anomalyMax && deltaRoll>anomalyMin){  
+  }else{
+    //Serial.println("Anomaly");
+  }
+  pD = deltaPitch;
+  rD = deltaRoll;
+  
   pitchOutput = pP + accError[0] + pD;
   rollOutput = rP + accError[1] + rD;
+
+  //max min values
+  if(pitchOutput>100){pitchOutput=100;}
+  if(rollOutput>100){rollOutput=100;}
+  if(pitchOutput<-100){pitchOutput=-100;}
+  if(rollOutput<-100){rollOutput=-100;}
+  
+  left(pitchOutput+rollOutput);
+  right(pitchOutput-rollOutput);
 }
 
 // --------------------------------- Plane -------------------------------
@@ -87,6 +116,14 @@ void control(){
   targetEuler.x+=yaw;
   targetEuler.y+=pitch;
   targetRotation = getQuaternion(targetEuler.x, targetEuler.y, targetEuler.z);
+}
+
+void left(float percentage){
+  ailLeft.write(map(percentage,-100,100,15,165)+trimLeft);
+}
+
+void right(float percentage){
+  ailRight.write(map(percentage,-100,100,165,15)+trimRight);
 }
 
 void connectionLost(){
@@ -208,6 +245,7 @@ void setup() {
           dmpReady = true;
       
           packetSize = mpu.dmpGetFIFOPacketSize();
+          Serial.println(packetSize);
         } else{
           Serial.print(F("DMP initialization failed code: "));
           Serial.print(devStatus);
@@ -219,16 +257,21 @@ void loop() {
         if(!dmpReady) return;
         
         // ---------- Transmitter communication -----------
+        /*
         if(Serial1.available() > 0){  
           char selector = Serial1.read();
     
           if(selector == 'y'){
             joyY = map(Serial1.parseFloat(),10,90,-10,10);
+            if(joyY>10){joyY=10;}
+            if(joyY<-10){joyY=-10;}
             timestampWhenLastConnected=millis();
           }
     
           if(selector == 'x'){
             joyX = map(Serial1.parseFloat(),10,90,-10,10);
+            if(joyX>10){joyX=10;}
+            if(joyX<-10){joyX=-10;}
             timestampWhenLastConnected=millis();
           }
     
@@ -240,7 +283,7 @@ void loop() {
           if(selector == 'o'){
             timestampWhenLastConnected=millis();
           }
-        }
+        }*/
 
         if(millis()-timestampWhenLastConnected>1000){
           connectionLost();
@@ -252,19 +295,21 @@ void loop() {
         }
 
         // --------- Gyro Processing ---------
+        fifoCount = mpu.getFIFOCount();
         if(mpuInterrupt || fifoCount>=packetSize){
           mpuInterrupt = false;
           mpuIntStatus = mpu.getIntStatus();
-        
-          fifoCount = mpu.getFIFOCount();
+         
           
           if((mpuIntStatus & 0x10) || fifoCount==1024){
             mpu.resetFIFO();
             Serial.println(F("FIFO OVERFLOW!"));
           } else if(mpuIntStatus & 0x02){
-            while(fifoCount < packetSize){
+            if(fifoCount < packetSize){
               fifoCount = mpu.getFIFOCount();
-              Serial.println("while loop!");
+              Serial.println(F("while loop!"));
+              lastWasAWhileLoop=true;
+              return;
             }
         
             mpu.getFIFOBytes(fifoBuffer, packetSize);
@@ -276,28 +321,78 @@ void loop() {
               targetEuler.x = toEuler(currentRotation).x;
             }
             
+            if(lastWasAWhileLoop){
+              lastWasAWhileLoop=false;
+              return;
+            }
             //Calculate Errors and do PID
-            float yawDifference = toEuler(getDifference(getQuaternion(toEuler(currentRotation).x,0,0),getQuaternion(toEuler(targetRotation).x,0,0))).x;
-            error[0] = toEuler(targetRotation).y - toEuler(currentRotation).y;
-            error[1] = (map(yawDifference,-180,180,-70,70))-toEuler(currentRotation).z;
+            VectorFloat currentVector = toEuler(currentRotation);
+            VectorFloat targetVector = toEuler(targetRotation);
+
+            float yawDifference = toEuler(getDifference(getQuaternion(currentVector.x,0,0),getQuaternion(targetVector.x,0,0))).x;
+            error[0] = targetVector.y - currentVector.y;
+            error[1] = (map(yawDifference,-180,180,-70,70))-currentVector.z;
+            float deltaError[] = {error[0]-lastError[0], error[1]-lastError[1]};
+            
+            float alt1ChangeDeltaError[2] = {deltaError[0]-lastDeltaError[0], deltaError[1]-lastDeltaError[1]};
+            float alt2ChangeDeltaError[2] = {(deltaError[0]-lastlastDeltaError[0])/2.0, (deltaError[1]-lastlastDeltaError[1])/2.0};
+            float alt3ChangeDeltaError[2] = {lastDeltaError[0]-lastlastDeltaError[0], lastDeltaError[1]-lastlastDeltaError[1]};
+
+            
+            for(int i=0; i<2; i++){
+                float v[3] = {alt1ChangeDeltaError[i], alt2ChangeDeltaError[i], alt3ChangeDeltaError[i]};
+                float smallestAbs = min(min(abs(v[0]),abs(v[1])),abs(v[2]));
+                for(int j=0; j<3; j++){
+                  if(abs(v[j]) == smallestAbs){
+                    delErr[i]+=v[j];
+                    break;
+                  }
+                }
+            }     
+
+            resetCounter+=1;
+            if(resetCounter>10){
+              if(abs(delErr[0]-deltaError[0])>0.9 || abs(delErr[1]-deltaError[1])>0.9){
+                
+              }else{
+                resetCounter=0;
+                delErr[0]=deltaError[0];
+                delErr[1]=deltaError[1];
+              }
+            }
             
             pid();
-            
-            lastError[0] = error[0];
-            lastError[1] = error[1];
-
-            VectorFloat tr = toEuler(targetRotation);
-            Serial.print("TargetRotation\t");
-            Serial.print(yawDifference);
+            /*Serial.print(pitchOutput);
+            Serial.print("\t");
+            Serial.print(rollOutput);
             Serial.print("\t");
             Serial.print(error[0]);
             Serial.print("\t");
-            Serial.println(error[1]);
+            Serial.print(error[1]);
+            
+            Serial.print("\t\t");*/
+            Serial.print(delErr[1]*10);
+            //Serial.print("\t");
+            //Serial.print(deltaError[1]*10);
+            Serial.print("\t");
+            Serial.print(0);
+            Serial.print("\t");
+            Serial.print(0);
 
-            // --- TODO --- 
             
-      
+            //Serial.print(changeDeltaError[0]*100);
+            //Serial.print("\t");
             
+            //Serial.print(fifoCount);
+            
+            Serial.println();
+           lastError[0] = error[0];
+           lastError[1] = error[1];
+           
+           lastlastDeltaError[0] = lastDeltaError[0];
+           lastlastDeltaError[1] = lastDeltaError[1];
+           lastDeltaError[0] = deltaError[0];
+           lastDeltaError[1] = deltaError[1];
           }
         }
 }
