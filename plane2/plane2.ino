@@ -46,15 +46,15 @@ Quaternion targetRotation;
 VectorFloat targetEuler(0,0,0);
 
 //              pitch | roll
-float pGain[2] = {0.0, 0.0};
+float pGain[2] = {2.0, 2.0};
 float iGain[2] = {0.0, 0.0};
-float dGain[2] = {90.0, 90.0};
+float dGain[2] = {80.0, 80.0};
 
 float error[2] = {0.0, 0.0};   // pitch and roll
 float lastError[2] = {0.0, 0.0}; // last pitch and roll error
 float delErr[2] = {0.0, 0.0};
 float accError[2] = {0.0, 0.0};
-float resetCounter = 0;
+float lastOffset = 0;
 
 float lastDeltaError[2] = {0.0, 0.0}; // to remove random spikes
 float lastlastDeltaError[2] = {0.0, 0.0};
@@ -75,21 +75,8 @@ void pid(){
   accError[0]+=iGain[0]*error[0];
   accError[1]+=iGain[1]*error[1];
 
-  float anomalyMax = 50;
-  float anomalyMin = -50;
-
-  float deltaPitch = (dGain[0] * (error[0] - lastError[0]));
-  float deltaRoll = (dGain[1] * (error[1] - lastError[1]));
-  if(deltaPitch<anomalyMax && deltaPitch>anomalyMin){  
-  }else{
-    //Serial.println("Anomaly");
-  }
-  if(deltaRoll<anomalyMax && deltaRoll>anomalyMin){  
-  }else{
-    //Serial.println("Anomaly");
-  }
-  pD = deltaPitch;
-  rD = deltaRoll;
+  pD = pD*0.3 + (dGain[0] * delErr[0])*0.7;
+  rD = rD*0.3 + (dGain[1] * delErr[1])*0.7;
   
   pitchOutput = pP + accError[0] + pD;
   rollOutput = rP + accError[1] + rD;
@@ -99,9 +86,10 @@ void pid(){
   if(rollOutput>100){rollOutput=100;}
   if(pitchOutput<-100){pitchOutput=-100;}
   if(rollOutput<-100){rollOutput=-100;}
-  
-  left(pitchOutput+rollOutput);
-  right(pitchOutput-rollOutput);
+  ailLeft.write(90);
+  ailRight.write(90);
+  ailLeft.write(map(pitchOutput+rollOutput,-100,100,15,165)+trimLeft);
+  ailRight.write(map(pitchOutput-rollOutput,-100,100,165,15)+trimRight);
 }
 
 // --------------------------------- Plane -------------------------------
@@ -118,16 +106,8 @@ void control(){
   targetRotation = getQuaternion(targetEuler.x, targetEuler.y, targetEuler.z);
 }
 
-void left(float percentage){
-  ailLeft.write(map(percentage,-100,100,15,165)+trimLeft);
-}
-
-void right(float percentage){
-  ailRight.write(map(percentage,-100,100,165,15)+trimRight);
-}
-
 void connectionLost(){
-  
+  motor(0);
 }
 // ------------- Quaternion ----------------------
 VectorFloat toEuler(Quaternion q){
@@ -166,11 +146,11 @@ Quaternion getDifference(Quaternion frameOfRefrence, Quaternion target){
 
 
 
-Quaternion addToQuaternion(Quaternion q, float yaw, float pitch, float roll){ 
+/*Quaternion addToQuaternion(Quaternion q, float yaw, float pitch, float roll){ 
         Quaternion extraRotation = getQuaternion(yaw, pitch, roll);
         Quaternion result = q.getProduct(extraRotation);
         return result;
-}
+}*/
 
 
 
@@ -215,15 +195,12 @@ void setup() {
         #endif
         Serial.begin(115200);
       
-        Serial.println(F("Initializing i2c devices..."));
         mpu.initialize();
         pinMode(INTERRUPT_PIN, INPUT);
       
-        Serial.println(F("Testing device connections..."));
         Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
       
-        Serial.println(F("Initializing DMP..."));
-         devStatus = mpu.dmpInitialize();
+        devStatus = mpu.dmpInitialize();
       
         mpu.setXGyroOffset(-37);
         mpu.setYGyroOffset(-7);
@@ -234,18 +211,14 @@ void setup() {
         mpu.setZAccelOffset(2290);
         
         if(devStatus == 0){
-          Serial.println(F("Enabling DMP..."));
           mpu.setDMPEnabled(true);
       
-          Serial.println(F("Enabling Interrupt detection"));
           attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN),dmpDataReady, RISING);
           mpuIntStatus = mpu.getIntStatus();
       
-          Serial.println(F("DMP ready! Waiting for first interrupt..."));
           dmpReady = true;
       
           packetSize = mpu.dmpGetFIFOPacketSize();
-          Serial.println(packetSize);
         } else{
           Serial.print(F("DMP initialization failed code: "));
           Serial.print(devStatus);
@@ -257,7 +230,7 @@ void loop() {
         if(!dmpReady) return;
         
         // ---------- Transmitter communication -----------
-        /*
+        
         if(Serial1.available() > 0){  
           char selector = Serial1.read();
     
@@ -277,15 +250,16 @@ void loop() {
     
           if(selector == 't'){
             pot1 = map(Serial1.parseFloat(),10,90,0,100);
+            motor(pot1);
             timestampWhenLastConnected=millis();
           }
     
           if(selector == 'o'){
             timestampWhenLastConnected=millis();
           }
-        }*/
+        }
 
-        if(millis()-timestampWhenLastConnected>1000){
+        if(millis()-timestampWhenLastConnected>900 ){
           connectionLost();
         }else{
           if(millis()-timestampDataProcessed>=20){
@@ -329,7 +303,11 @@ void loop() {
             VectorFloat currentVector = toEuler(currentRotation);
             VectorFloat targetVector = toEuler(targetRotation);
 
-            float yawDifference = toEuler(getDifference(getQuaternion(currentVector.x,0,0),getQuaternion(targetVector.x,0,0))).x;
+            //float yawDifference = toEuler(getDifference(getQuaternion(currentVector.x,0,0),getQuaternion(targetVector.x,0,0))).x;
+            float yawDifference = targetVector.x-currentVector.x;
+            if(yawDifference>180){
+              yawDifference = -(360-yawDifference);
+            }
             error[0] = targetVector.y - currentVector.y;
             error[1] = (map(yawDifference,-180,180,-70,70))-currentVector.z;
             float deltaError[] = {error[0]-lastError[0], error[1]-lastError[1]};
@@ -350,15 +328,12 @@ void loop() {
                 }
             }     
 
-            resetCounter+=1;
-            if(resetCounter>10){
-              if(abs(delErr[0]-deltaError[0])>0.9 || abs(delErr[1]-deltaError[1])>0.9){
-                
-              }else{
-                resetCounter=0;
-                delErr[0]=deltaError[0];
-                delErr[1]=deltaError[1];
-              }
+            
+            float err = abs(delErr[1]-deltaError[1]);
+            if(lastOffset>0.13 && err>0.13){
+                delErr[0]=delErr[0]*0.95 + deltaError[0]*0.05;
+                delErr[1]=delErr[1]*0.95 + deltaError[1]*0.05;
+                Serial.println(F("FIXED!"));
             }
             
             pid();
@@ -371,13 +346,13 @@ void loop() {
             Serial.print(error[1]);
             
             Serial.print("\t\t");*/
-            Serial.print(delErr[1]*10);
-            //Serial.print("\t");
-            //Serial.print(deltaError[1]*10);
-            Serial.print("\t");
-            Serial.print(0);
-            Serial.print("\t");
-            Serial.print(0);
+            Serial.print(lastOffset);
+            Serial.print(F("\t"));
+            Serial.print(error[1]);
+            Serial.print(F("\t"));
+            Serial.print(rollOutput);
+            Serial.print(F("\t"));
+            Serial.print(err);
 
             
             //Serial.print(changeDeltaError[0]*100);
@@ -393,6 +368,7 @@ void loop() {
            lastlastDeltaError[1] = lastDeltaError[1];
            lastDeltaError[0] = deltaError[0];
            lastDeltaError[1] = deltaError[1];
+           lastOffset = err;
           }
         }
 }
